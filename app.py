@@ -1,17 +1,49 @@
 import os
 import sqlite3
-import json
 import csv
 import io
-from flask import Flask, render_template, request, jsonify, Response, send_file
+from datetime import date
+from flask import Flask, render_template, request, jsonify, Response
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 DB_PATH = os.path.join(os.path.dirname(__file__), 'kpi_database.db')
+
+# Per-employee KPI achievement, weighted by each KPI's weight (consistent
+# across the summary, table and detail views instead of a plain average).
+EMP_SCORE_CTE = '''
+WITH emp_scores AS (
+    SELECT e.id AS emp_id,
+           CASE WHEN SUM(k.weight) > 0
+                THEN SUM(k.progress_pct * k.weight) * 1.0 / SUM(k.weight)
+                ELSE 0 END AS weighted_pct,
+           COUNT(k.id) AS kpi_count,
+           SUM(CASE WHEN k.status = '지연' THEN 1 ELSE 0 END) AS delayed_kpi_cnt
+    FROM employees e
+    LEFT JOIN kpis k ON k.emp_id = e.id
+    GROUP BY e.id
+)
+'''
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def parse_float(value, default=None):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def parse_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def employee_exists(cursor, emp_id):
+    cursor.execute('SELECT 1 FROM employees WHERE id = ?', (emp_id,))
+    return cursor.fetchone() is not None
 
 def init_db():
     conn = get_db()
@@ -172,18 +204,17 @@ def dashboard_summary():
     conn = get_db()
     cursor = conn.cursor()
 
-    query = '''
+    query = EMP_SCORE_CTE + '''
     SELECT e.id, e.name, e.dept_id, d.name as dept_name, e.position, e.eval_grade, e.eval_score,
-           AVG(k.progress_pct) as avg_kpi_pct, COUNT(k.id) as kpi_count
+           es.weighted_pct as avg_kpi_pct, es.kpi_count as kpi_count
     FROM employees e
     JOIN departments d ON e.dept_id = d.id
-    LEFT JOIN kpis k ON e.id = k.emp_id
+    JOIN emp_scores es ON es.emp_id = e.id
     '''
     params = []
     if dept_id:
         query += ' WHERE e.dept_id = ?'
         params.append(dept_id)
-    query += ' GROUP BY e.id'
 
     cursor.execute(query, params)
     rows = cursor.fetchall()
@@ -203,12 +234,12 @@ def dashboard_summary():
     top_performers = sum(1 for row in rows if row['eval_grade'] in ['S', 'A'])
     risk_employees = sum(1 for row in rows if (row['avg_kpi_pct'] or 0) < 70 or row['eval_grade'] in ['C', 'D'])
 
-    # Department level stats
-    cursor.execute('''
-    SELECT d.id, d.name, AVG(k.progress_pct) as avg_pct, COUNT(DISTINCT e.id) as emp_cnt
+    # Department level stats (average of each employee's weighted score)
+    cursor.execute(EMP_SCORE_CTE + '''
+    SELECT d.id, d.name, AVG(es.weighted_pct) as avg_pct, COUNT(DISTINCT e.id) as emp_cnt
     FROM departments d
     JOIN employees e ON d.id = e.dept_id
-    LEFT JOIN kpis k ON e.id = k.emp_id
+    JOIN emp_scores es ON es.emp_id = e.id
     GROUP BY d.id
     ''')
     dept_rows = cursor.fetchall()
@@ -266,14 +297,14 @@ def get_employees():
     conn = get_db()
     cursor = conn.cursor()
 
-    query = '''
+    query = EMP_SCORE_CTE + '''
     SELECT e.*, d.name as dept_name,
-           AVG(k.progress_pct) as avg_kpi_pct,
-           COUNT(k.id) as kpi_count,
-           SUM(CASE WHEN k.status = '지연' THEN 1 ELSE 0 END) as delayed_kpi_cnt
+           es.weighted_pct as avg_kpi_pct,
+           es.kpi_count as kpi_count,
+           es.delayed_kpi_cnt as delayed_kpi_cnt
     FROM employees e
     JOIN departments d ON e.dept_id = d.id
-    LEFT JOIN kpis k ON e.id = k.emp_id
+    JOIN emp_scores es ON es.emp_id = e.id
     WHERE 1=1
     '''
     params = []
@@ -288,10 +319,14 @@ def get_employees():
         params.extend([pattern, pattern, pattern, pattern])
 
     if grade_filter:
-        query += ' AND e.eval_grade = ?'
-        params.append(grade_filter)
+        if grade_filter == 'CD':
+            query += ' AND e.eval_grade IN (?, ?)'
+            params.extend(['C', 'D'])
+        else:
+            query += ' AND e.eval_grade = ?'
+            params.append(grade_filter)
 
-    query += ' GROUP BY e.id ORDER BY e.eval_score DESC'
+    query += ' ORDER BY e.eval_score DESC'
 
     cursor.execute(query, params)
     rows = cursor.fetchall()
@@ -348,7 +383,7 @@ def get_employee_detail(emp_id):
 
     if not emp_row:
         conn.close()
-        return jsonify({'error': 'Employee not found'}), 44
+        return jsonify({'error': 'Employee not found'}), 404
 
     cursor.execute('''
     SELECT * FROM kpis WHERE emp_id = ? ORDER BY id ASC
@@ -368,12 +403,24 @@ def get_employee_detail(emp_id):
 
 @app.route('/api/employees/<int:emp_id>/kpis', methods=['POST'])
 def add_kpi(emp_id):
-    data = request.json
+    data = request.json or {}
+
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({'error': 'title은 필수 항목입니다.'}), 400
+
+    target_val = parse_float(data.get('target_val'), 1.0)
+    current_val = parse_float(data.get('current_val'), 0.0)
+    weight = parse_int(data.get('weight'), 20)
+    if target_val is None or current_val is None or weight is None:
+        return jsonify({'error': '목표치/현재실적/가중치는 숫자여야 합니다.'}), 400
+
     conn = get_db()
     cursor = conn.cursor()
 
-    target_val = float(data.get('target_val', 1.0))
-    current_val = float(data.get('current_val', 0.0))
+    if not employee_exists(cursor, emp_id):
+        conn.close()
+        return jsonify({'error': 'Employee not found'}), 404
 
     if target_val > 0:
         progress_pct = min(200, int((current_val / target_val) * 100))
@@ -389,9 +436,9 @@ def add_kpi(emp_id):
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         emp_id,
-        data.get('title'),
+        title,
         data.get('category', '논문/R&D'),
-        int(data.get('weight', 20)),
+        weight,
         target_val,
         current_val,
         data.get('unit', '건'),
@@ -408,19 +455,29 @@ def add_kpi(emp_id):
 
 @app.route('/api/kpis/<int:kpi_id>', methods=['PUT'])
 def update_kpi(kpi_id):
-    data = request.json
+    data = request.json or {}
     conn = get_db()
     cursor = conn.cursor()
 
-    target_val = float(data.get('target_val', 1.0))
-    current_val = float(data.get('current_val', 0.0))
+    cursor.execute('SELECT * FROM kpis WHERE id = ?', (kpi_id,))
+    existing = cursor.fetchone()
+    if not existing:
+        conn.close()
+        return jsonify({'error': 'KPI not found'}), 404
+
+    target_val = parse_float(data.get('target_val'), existing['target_val'])
+    current_val = parse_float(data.get('current_val'), existing['current_val'])
+    weight = parse_int(data.get('weight'), existing['weight'])
+    if target_val is None or current_val is None or weight is None:
+        conn.close()
+        return jsonify({'error': '목표치/현재실적/가중치는 숫자여야 합니다.'}), 400
 
     if target_val > 0:
         progress_pct = min(200, int((current_val / target_val) * 100))
     else:
         progress_pct = 0
 
-    status = data.get('status', '정상진행')
+    status = data.get('status', existing['status'] or '정상진행')
     if progress_pct >= 100:
         status = '완료'
 
@@ -429,16 +486,16 @@ def update_kpi(kpi_id):
     SET title = ?, category = ?, weight = ?, target_val = ?, current_val = ?, unit = ?, status = ?, target_date = ?, progress_pct = ?, description = ?
     WHERE id = ?
     ''', (
-        data.get('title'),
-        data.get('category'),
-        int(data.get('weight')),
+        data.get('title', existing['title']),
+        data.get('category', existing['category']),
+        weight,
         target_val,
         current_val,
-        data.get('unit'),
+        data.get('unit', existing['unit']),
         status,
-        data.get('target_date'),
+        data.get('target_date', existing['target_date']),
         progress_pct,
-        data.get('description'),
+        data.get('description', existing['description']),
         kpi_id
     ))
 
@@ -458,14 +515,26 @@ def delete_kpi(kpi_id):
 
 @app.route('/api/employees/<int:emp_id>/eval', methods=['POST'])
 def save_evaluation(emp_id):
-    data = request.json
+    data = request.json or {}
     conn = get_db()
     cursor = conn.cursor()
 
-    eval_score = int(data.get('eval_score', 80))
+    if not employee_exists(cursor, emp_id):
+        conn.close()
+        return jsonify({'error': 'Employee not found'}), 404
+
+    eval_score = parse_int(data.get('eval_score'), 80)
+    if eval_score is None or not (0 <= eval_score <= 100):
+        conn.close()
+        return jsonify({'error': '평가 점수는 0~100 사이의 숫자여야 합니다.'}), 400
+
     eval_grade = data.get('eval_grade', 'B')
+    if eval_grade not in ('S', 'A', 'B', 'C', 'D'):
+        conn.close()
+        return jsonify({'error': '유효하지 않은 평가 등급입니다.'}), 400
+
     eval_feedback = data.get('eval_feedback', '')
-    eval_date = data.get('eval_date', '2026-08-12')
+    eval_date = data.get('eval_date') or date.today().isoformat()
 
     cursor.execute('''
     UPDATE employees
@@ -543,13 +612,12 @@ def export_csv():
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute('''
+    cursor.execute(EMP_SCORE_CTE + '''
     SELECT e.emp_no, e.name, d.name as dept_name, e.position, e.eval_grade, e.eval_score,
-           AVG(k.progress_pct) as avg_kpi_pct, e.research_area
+           es.weighted_pct as avg_kpi_pct, e.research_area
     FROM employees e
     JOIN departments d ON e.dept_id = d.id
-    LEFT JOIN kpis k ON e.id = k.emp_id
-    GROUP BY e.id
+    JOIN emp_scores es ON es.emp_id = e.id
     ORDER BY e.eval_score DESC
     ''')
     rows = cursor.fetchall()
@@ -578,5 +646,8 @@ def export_csv():
 
 if __name__ == '__main__':
     init_db()
-    print("Starting KRRI Executive KPI Dashboard server on http://127.0.0.1:5000")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    host = os.environ.get('FLASK_HOST', '127.0.0.1')
+    port = int(os.environ.get('FLASK_PORT', 5000))
+    debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
+    print(f"Starting KRRI Executive KPI Dashboard server on http://{host}:{port}")
+    app.run(host=host, port=port, debug=debug_mode)

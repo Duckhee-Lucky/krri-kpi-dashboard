@@ -54,6 +54,17 @@ function showToast(message, type = 'info') {
     }, 3000);
 }
 
+// Escape user-supplied text before inserting via innerHTML
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Debounce Search
 function debounceSearch() {
     clearTimeout(searchTimeout);
@@ -302,15 +313,15 @@ async function loadEmployeeTable() {
             if (emp.avg_kpi_pct < 70) fillClass = 'fill-danger';
 
             tr.innerHTML = `
-                <td style="font-family: monospace; font-weight: 600;">${emp.emp_no}</td>
+                <td style="font-family: monospace; font-weight: 600;">${escapeHtml(emp.emp_no)}</td>
                 <td>
-                    <div style="font-weight: 700;">${emp.name}</div>
-                    <div style="font-size: 0.75rem; color: var(--text-muted);">${emp.email}</div>
+                    <div style="font-weight: 700;">${escapeHtml(emp.name)}</div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">${escapeHtml(emp.email)}</div>
                 </td>
-                <td>${emp.dept_name}</td>
-                <td><span class="badge" style="background: var(--bg-main); color: var(--text-main); border: 1px solid var(--border-color);">${emp.position}</span></td>
-                <td style="max-width: 220px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${emp.research_area}">
-                    ${emp.research_area}
+                <td>${escapeHtml(emp.dept_name)}</td>
+                <td><span class="badge" style="background: var(--bg-main); color: var(--text-main); border: 1px solid var(--border-color);">${escapeHtml(emp.position)}</span></td>
+                <td style="max-width: 220px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${escapeHtml(emp.research_area)}">
+                    ${escapeHtml(emp.research_area)}
                 </td>
                 <td class="progress-cell">
                     <div class="progress-bar-bg">
@@ -339,17 +350,17 @@ async function loadEmployeeTable() {
 }
 
 // Table Filter Buttons
-function filterTableStatus(status) {
+function filterTableStatus(status, evt) {
     currentFilterStatus = status;
     currentFilterGrade = '';
-    updatePillButtons(event.target);
+    updatePillButtons(evt ? evt.target : null);
     loadEmployeeTable();
 }
 
-function filterTableGrade(grade) {
+function filterTableGrade(grade, evt) {
     currentFilterGrade = grade;
     currentFilterStatus = '';
-    updatePillButtons(event.target);
+    updatePillButtons(evt ? evt.target : null);
     loadEmployeeTable();
 }
 
@@ -367,7 +378,7 @@ async function openEmployeeModal(empId) {
         const emp = data.employee;
         const kpis = data.kpis;
 
-        // Profile banner
+        // Profile banner (innerText is used here, so no HTML-escaping is needed)
         document.getElementById('empModalAvatar').innerText = emp.name[0];
         document.getElementById('empModalNamePos').innerText = `${emp.name} ${emp.position}`;
         document.getElementById('empModalDept').innerText = emp.dept_name;
@@ -384,12 +395,12 @@ async function openEmployeeModal(empId) {
             kpis.forEach(k => {
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
-                    <td style="font-weight: 600;">${k.title}</td>
-                    <td><span class="badge" style="background: var(--bg-main); color: var(--text-main); border:1px solid var(--border-color);">${k.category}</span></td>
+                    <td style="font-weight: 600;">${escapeHtml(k.title)}</td>
+                    <td><span class="badge" style="background: var(--bg-main); color: var(--text-main); border:1px solid var(--border-color);">${escapeHtml(k.category)}</span></td>
                     <td style="font-weight: 700;">${k.weight}%</td>
-                    <td>${k.target_val} ${k.unit}</td>
+                    <td>${k.target_val} ${escapeHtml(k.unit)}</td>
                     <td>
-                        <input type="number" step="0.1" value="${k.current_val}" style="width: 70px; padding: 0.2rem;" class="text-input" onchange="updateKpiCurrent(${k.id}, this.value, ${k.target_val})"> ${k.unit}
+                        <input type="number" step="0.1" value="${k.current_val}" style="width: 70px; padding: 0.2rem;" class="text-input" onchange="updateKpiCurrent(${k.id}, this.value, ${k.target_val})"> ${escapeHtml(k.unit)}
                     </td>
                     <td style="font-weight: 700; color: ${k.progress_pct >= 100 ? 'var(--status-success)' : 'var(--krri-navy)'}">
                         ${k.progress_pct}%
@@ -453,9 +464,12 @@ async function saveEvaluation(event) {
             closeModal('empDetailModal');
             loadDashboardData();
             loadEmployeeTable();
+        } else {
+            showToast(data.error || '평가 저장에 실패했습니다.');
         }
     } catch (err) {
         console.error('Error saving evaluation:', err);
+        showToast('평가 저장 중 오류가 발생했습니다.');
     }
 }
 
@@ -492,9 +506,12 @@ async function saveNewKpi(event) {
             closeModal('addKpiModal');
             openEmployeeModal(currentEmpId);
             loadDashboardData();
+        } else {
+            showToast(data.error || 'KPI 등록에 실패했습니다.');
         }
     } catch (err) {
         console.error('Error adding KPI:', err);
+        showToast('KPI 등록 중 오류가 발생했습니다.');
     }
 }
 

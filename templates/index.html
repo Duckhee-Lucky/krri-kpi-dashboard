@@ -180,13 +180,13 @@
                 <h3 class="table-title">📑 직원의 세부 KPI 및 성과 평가 관리 Table</h3>
                 
                 <div class="filter-pills">
-                    <button class="pill-btn active" onclick="filterTableStatus('')">전체보기</button>
-                    <button class="pill-btn" onclick="filterTableStatus('달성우수')">달성우수</button>
-                    <button class="pill-btn" onclick="filterTableStatus('정상진행')">정상진행</button>
-                    <button class="pill-btn" onclick="filterTableStatus('관심필요')">관심필요/지연</button>
-                    <button class="pill-btn" onclick="filterTableGrade('S')">S등급</button>
-                    <button class="pill-btn" onclick="filterTableGrade('A')">A등급</button>
-                    <button class="pill-btn" onclick="filterTableGrade('C')">C/D등급</button>
+                    <button class="pill-btn active" onclick="filterTableStatus('', event)">전체보기</button>
+                    <button class="pill-btn" onclick="filterTableStatus('달성우수', event)">달성우수</button>
+                    <button class="pill-btn" onclick="filterTableStatus('정상진행', event)">정상진행</button>
+                    <button class="pill-btn" onclick="filterTableStatus('관심필요', event)">관심필요/지연</button>
+                    <button class="pill-btn" onclick="filterTableGrade('S', event)">S등급</button>
+                    <button class="pill-btn" onclick="filterTableGrade('A', event)">A등급</button>
+                    <button class="pill-btn" onclick="filterTableGrade('CD', event)">C/D등급</button>
                 </div>
             </div>
 
