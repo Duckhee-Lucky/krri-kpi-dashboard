@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KRRI 보직자 전용 직원 KPI 성과관리 대시보드</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <!-- Header -->
+    <header class="app-header">
+        <div class="header-container">
+            <div class="brand-section">
+                <span class="krri-badge">KRRI</span>
+                <div class="header-title-group">
+                    <h1>한국철도기술연구원 보직자 전용 KPI 성과관리 시스템</h1>
+                    <span class="header-subtitle">Executive Employee Performance & KPI Analytics System</span>
+                </div>
+            </div>
+
+            <div class="header-controls">
+                <button class="btn btn-ai" onclick="openAIReportModal()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20M5 5l14 14M5 19L19 5"/></svg>
+                    AI 성과 분석
+                </button>
+                <button class="btn btn-outline-white" onclick="exportCSV()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                    CSV 내보내기
+                </button>
+                <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" title="다크/라이트 모드 전환">
+                    <svg id="themeIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                </button>
+                
+                <div class="exec-profile-chip">
+                    <div class="avatar">소장</div>
+                    <div class="exec-info">
+                        <div class="exec-name">김철수 연구소장</div>
+                        <div class="exec-role">미래교통물류연구소 / 보직자</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-wrapper">
+
+        <!-- Filter Bar -->
+        <section class="filter-bar-card">
+            <div class="filter-group">
+                <span class="filter-label">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+                    관할 조직:
+                </span>
+                <select id="deptSelect" class="select-input" onchange="loadDashboardData()">
+                    <option value="">전체 관할 부서 (통합)</option>
+                    <option value="1">미래교통물류연구소</option>
+                    <option value="2">차세대철도차량연구센터</option>
+                    <option value="3">스마트전력·신호연구실</option>
+                    <option value="4">철도구조·해상교량연구실</option>
+                    <option value="5">철도안전·환경연구실</option>
+                </select>
+
+                <span class="filter-label" style="margin-left: 1rem;">평가 연도:</span>
+                <select id="yearSelect" class="select-input">
+                    <option value="2026">2026년도 (현재)</option>
+                    <option value="2025">2025년도</option>
+                </select>
+            </div>
+
+            <div class="filter-group">
+                <input type="text" id="searchInput" class="text-input" placeholder="직원명, 사번, 연구분야 검색..." onkeyup="debounceSearch()">
+                <button class="btn btn-secondary" onclick="resetFilters()">필터 초기화</button>
+            </div>
+        </section>
+
+        <!-- KPI Metric Cards Grid -->
+        <section class="stats-grid">
+            <div class="stat-card navy">
+                <div class="stat-header">
+                    <span class="stat-title">관할 전체 직원</span>
+                    <div class="stat-icon icon-navy">👥</div>
+                </div>
+                <div class="stat-value" id="cardTotalEmp">-</div>
+                <div class="stat-footer">
+                    <span class="stat-trend trend-up">정원 100%</span>
+                    <span>연구직 85%, 행정/기술직 15%</span>
+                </div>
+            </div>
+
+            <div class="stat-card cyan">
+                <div class="stat-header">
+                    <span class="stat-title">평균 KPI 목표 달성률</span>
+                    <div class="stat-icon icon-cyan">🎯</div>
+                </div>
+                <div class="stat-value" id="cardAvgPct">-</div>
+                <div class="stat-footer">
+                    <span class="stat-trend trend-up" id="cardAvgTrend">전년 대비 +4.2%</span>
+                    <span>목표 85.0% 대비 달성</span>
+                </div>
+            </div>
+
+            <div class="stat-card success">
+                <div class="stat-header">
+                    <span class="stat-title">S/A등급 우수 성과자</span>
+                    <div class="stat-icon icon-success">🏆</div>
+                </div>
+                <div class="stat-value" id="cardTopCount">-</div>
+                <div class="stat-footer">
+                    <span class="stat-trend trend-up">상위 40% 이내</span>
+                    <span>포상 및 우수연구원 추천 대상</span>
+                </div>
+            </div>
+
+            <div class="stat-card danger">
+                <div class="stat-header">
+                    <span class="stat-title">관심/지연 집중관리 인원</span>
+                    <div class="stat-icon icon-danger">⚠️</div>
+                </div>
+                <div class="stat-value" id="cardRiskCount">-</div>
+                <div class="stat-footer">
+                    <span class="stat-trend trend-down">KPI 달성률 70% 미만</span>
+                    <span>1:1 보직자 성과 면담 필요</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Visual Charts Grid -->
+        <section class="charts-grid">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3 class="chart-title">📊 부서별 평균 KPI 달성률 비교</h3>
+                </div>
+                <div class="chart-container">
+                    <canvas id="deptChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3 class="chart-title">📈 2026년 분기별 성과 진행 추이</h3>
+                </div>
+                <div class="chart-container">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3 class="chart-title">🕸️ KPI 영역별 평균 달성도 (Radar)</h3>
+                </div>
+                <div class="chart-container">
+                    <canvas id="categoryChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3 class="chart-title">🍩 보직자 성과 평가 등급 분포</h3>
+                </div>
+                <div class="chart-container">
+                    <canvas id="gradeChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Employee KPI Management Table -->
+        <section class="table-card">
+            <div class="table-header-bar">
+                <h3 class="table-title">📑 직원의 세부 KPI 및 성과 평가 관리 Table</h3>
+                
+                <div class="filter-pills">
+                    <button class="pill-btn active" onclick="filterTableStatus('')">전체보기</button>
+                    <button class="pill-btn" onclick="filterTableStatus('달성우수')">달성우수</button>
+                    <button class="pill-btn" onclick="filterTableStatus('정상진행')">정상진행</button>
+                    <button class="pill-btn" onclick="filterTableStatus('관심필요')">관심필요/지연</button>
+                    <button class="pill-btn" onclick="filterTableGrade('S')">S등급</button>
+                    <button class="pill-btn" onclick="filterTableGrade('A')">A등급</button>
+                    <button class="pill-btn" onclick="filterTableGrade('C')">C/D등급</button>
+                </div>
+            </div>
+
+            <div class="data-table-wrapper">
+                <table class="custom-table" id="employeeTable">
+                    <thead>
+                        <tr>
+                            <th>사번</th>
+                            <th>성명</th>
+                            <th>소속부서</th>
+                            <th>직급</th>
+                            <th>주요 연구 분야</th>
+                            <th>KPI 평균 달성률</th>
+                            <th>보직자 평가</th>
+                            <th>상태</th>
+                            <th>관리 Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="employeeTableBody">
+                        <!-- JS Dynamic Insert -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+        <p>© 2026 한국철도기술연구원 (KRRI) - 보직자 전용 직원 KPI 성과관리 시스템 | 보안등급: 원내 보안</p>
+    </footer>
+
+    <!-- Employee Detail & Evaluation Modal -->
+    <div class="modal-overlay" id="empDetailModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title" id="empModalTitle">직원 세부 KPI 및 성과 평가</h3>
+                <button class="modal-close" onclick="closeModal('empDetailModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Employee Profile Banner -->
+                <div class="emp-profile-banner">
+                    <div class="emp-avatar-lg" id="empModalAvatar">김</div>
+                    <div class="emp-meta-grid">
+                        <div class="meta-item">
+                            <div class="meta-label">성명 / 직급</div>
+                            <div class="meta-value" id="empModalNamePos">-</div>
+                        </div>
+                        <div class="meta-item">
+                            <div class="meta-label">소속 부서</div>
+                            <div class="meta-value" id="empModalDept">-</div>
+                        </div>
+                        <div class="meta-item">
+                            <div class="meta-label">사번 / 이메일</div>
+                            <div class="meta-value" id="empModalNoEmail">-</div>
+                        </div>
+                        <div class="meta-item">
+                            <div class="meta-label">주요 연구 분야</div>
+                            <div class="meta-value" id="empModalResearch">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- KPI Items Section -->
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                    <h4 style="font-size: 1rem; font-weight: 700;">📌 세부 KPI 항목 (목표 대비 실적)</h4>
+                    <button class="btn btn-primary" style="padding: 0.35rem 0.8rem; font-size: 0.8rem;" onclick="openAddKpiModal()">+ KPI 목표 추가</button>
+                </div>
+
+                <div class="data-table-wrapper" style="margin-bottom: 1.5rem;">
+                    <table class="custom-table">
+                        <thead>
+                            <tr>
+                                <th>KPI 항목명</th>
+                                <th>분류</th>
+                                <th>가중치</th>
+                                <th>목표치</th>
+                                <th>현재실적</th>
+                                <th>달성률</th>
+                                <th>상태</th>
+                                <th>관리</th>
+                            </tr>
+                        </thead>
+                        <tbody id="kpiListBody">
+                            <!-- Dynamic Insert -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Executive Evaluation & Feedback Section -->
+                <div style="background: var(--bg-main); padding: 1.25rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+                    <h4 style="font-size: 1rem; font-weight: 700; margin-bottom: 1rem; color: var(--krri-navy);">✍️ 보직자 1:1 성과 평가 및 면담 피드백 작성</h4>
+                    <form id="evalForm" onsubmit="saveEvaluation(event)">
+                        <input type="hidden" id="evalEmpId">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label class="form-label">정량/정성 평가 점수 (100점 만점)</label>
+                                <input type="number" id="evalScoreInput" class="text-input" min="0" max="100" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">최종 성과 등급</label>
+                                <select id="evalGradeSelect" class="select-input">
+                                    <option value="S">S등급 (최우수 95~100점)</option>
+                                    <option value="A">A등급 (우수 85~94점)</option>
+                                    <option value="B">B등급 (보통 75~84점)</option>
+                                    <option value="C">C등급 (미흡 65~74점)</option>
+                                    <option value="D">D등급 (매우미흡 65점 미만)</option>
+                                </select>
+                            </div>
+                            <div class="form-group full-width">
+                                <label class="form-label">보직자 피드백 / 코칭 메시지 및 면담록</label>
+                                <textarea id="evalFeedbackText" class="text-input" placeholder="직원에 대한 성과 총평, 잘한 점, 보완할 점, 면담 핵심 내용을 기재하세요."></textarea>
+                            </div>
+                        </div>
+                        <div style="margin-top: 1rem; text-align: right;">
+                            <button type="submit" class="btn btn-primary">보직자 평가 및 면담록 저장</button>
+                        </div>
+                    </form>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- Add KPI Modal -->
+    <div class="modal-overlay" id="addKpiModal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3 class="modal-title">신규 KPI 목표 항목 추가</h3>
+                <button class="modal-close" onclick="closeModal('addKpiModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="addKpiForm" onsubmit="saveNewKpi(event)">
+                    <div class="form-grid" style="grid-template-columns: 1fr;">
+                        <div class="form-group">
+                            <label class="form-label">KPI 항목명</label>
+                            <input type="text" id="kpiTitle" class="text-input" placeholder="예: SCI급 논문 게재, 특허 출원 등" required>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label class="form-label">분류</label>
+                                <select id="kpiCategory" class="select-input">
+                                    <option value="논문/R&D">논문/R&D</option>
+                                    <option value="특허/IP">특허/IP</option>
+                                    <option value="과제수주">과제수주</option>
+                                    <option value="기술이전/사업화">기술이전/사업화</option>
+                                    <option value="안전/관리">안전/관리</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">가중치 (%)</label>
+                                <input type="number" id="kpiWeight" class="text-input" value="20" min="5" max="100" required>
+                            </div>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label class="form-label">목표치</label>
+                                <input type="number" step="0.1" id="kpiTarget" class="text-input" value="1.0" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">현재 실적</label>
+                                <input type="number" step="0.1" id="kpiCurrent" class="text-input" value="0.0" required>
+                            </div>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label class="form-label">단위</label>
+                                <input type="text" id="kpiUnit" class="text-input" value="건" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">목표 달성 기한</label>
+                                <input type="date" id="kpiTargetDate" class="text-input" value="2026-12-31" required>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">세부 착수 내용 / 비고</label>
+                            <textarea id="kpiDesc" class="text-input" placeholder="세부 실행 계획을 기재하세요."></textarea>
+                        </div>
+                    </div>
+                    <div style="margin-top: 1.5rem; text-align: right;">
+                        <button type="button" class="btn btn-secondary" onclick="closeModal('addKpiModal')">취소</button>
+                        <button type="submit" class="btn btn-primary">KPI 저장</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Analysis Modal -->
+    <div class="modal-overlay" id="aiReportModal">
+        <div class="modal-content" style="max-width: 750px;">
+            <div class="modal-header" style="background: linear-gradient(135deg, #8b5cf6, #4f46e5);">
+                <h3 class="modal-title">🤖 KRRI 보직자 AI 성과 분석 및 조언</h3>
+                <button class="modal-close" onclick="closeModal('aiReportModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="ai-report-box" id="aiReportText">
+                    데이터를 분석 중입니다...
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('aiReportModal')">닫기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- JS -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
