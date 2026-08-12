@@ -33,5 +33,9 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Database (optional - uncomment if database shouldn't be pushed)
-# *.db
+# Database (app now uses an external PostgreSQL DB; no local SQLite file)
+*.db
+
+# Environment variables (DATABASE_URL, etc.)
+.env
+.vercel

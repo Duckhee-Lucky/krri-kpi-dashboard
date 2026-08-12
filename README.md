@@ -20,7 +20,7 @@
 - **보직자 1:1 평가 & 면담록**: 
   - 정량/정성 평가 점수 (0~100점)
   - 성과 등급 부여 (S/A/B/C/D)
-  - 보직자 피드백 / 코칭 메시지 및 면담록 등록 (SQLite DB 영속 저장)
+  - 보직자 피드백 / 코칭 메시지 및 면담록 등록 (PostgreSQL DB 영속 저장)
 
 ### 3. 🤖 AI 보직자 성과 분석 & 리포트 (AI Executive Advisor)
 - 버튼 클릭 한 번으로 관할 조직 성과 데이터 다차원 분석
@@ -35,9 +35,10 @@
 ## 🛠️ 기술 스택 (Tech Stack)
 
 - **Backend**: Python 3.12, Flask
-- **Database**: SQLite 3
+- **Database**: PostgreSQL (예: Vercel Postgres / Neon)
 - **Frontend**: HTML5, Vanilla CSS3 (KRRI Navy/Cyan Palette), JavaScript (ES6+)
 - **Data Visualization**: Chart.js
+- **Deployment**: Vercel (서버리스, `@vercel/python`)
 
 ---
 
@@ -45,11 +46,19 @@
 
 ### 1. 사전 요구사항
 - Python 3.8 이상 설치
+- PostgreSQL 데이터베이스 (로컬 Postgres, 또는 Neon/Vercel Postgres 등 무료 호스팅 DB)
 
-### 2. 프로젝트 설치 및 실행
+### 2. 환경변수 설정 (필수)
+이 앱은 SQLite 대신 PostgreSQL을 사용합니다. 프로젝트 루트에 `.env` 파일을 만들고 연결 문자열을 지정합니다.
+```
+DATABASE_URL=postgresql://user:password@host:5432/dbname?sslmode=require
+```
+(Vercel Postgres/Neon을 쓴다면 해당 대시보드에서 발급된 connection string을 그대로 붙여넣으면 됩니다.)
+
+### 3. 프로젝트 설치 및 실행
 
 #### Windows (원클릭 실행)
-`run.bat` 파일을 더블 클릭하여 실행합니다.
+`run.bat` 파일을 더블 클릭하여 실행합니다. (`.env`에 `DATABASE_URL`이 없으면 안내 메시지를 띄우고 종료합니다.)
 
 #### 명령 프롬프트 (CMD / PowerShell)
 ```bash
@@ -59,16 +68,33 @@ pip install -r requirements.txt
 # 2. Flask 서버 구동
 python app.py
 ```
+최초 실행 시 테이블 생성 및 더미 시드 데이터 삽입이 자동으로 수행됩니다.
 
-### 3. 브라우저 접속
+### 4. 브라우저 접속
 서버 구동 후 웹 브라우저에서 다음 주소로 접속합니다.
 - **[http://127.0.0.1:5000](http://127.0.0.1:5000)**
 
-### 4. 환경변수 (선택)
-기본값은 로컬 전용(`127.0.0.1`) · 디버그 모드 꺼짐입니다. 필요 시 아래 환경변수로 조정합니다.
-- `FLASK_HOST` : 바인딩 주소 (기본 `127.0.0.1`, 원내망 공유 시 `0.0.0.0`)
-- `FLASK_PORT` : 포트 (기본 `5000`)
+### 5. 환경변수 목록
+- `DATABASE_URL` (또는 `POSTGRES_URL`) : PostgreSQL 연결 문자열 (**필수**)
+- `FLASK_HOST` : 바인딩 주소 (기본 `127.0.0.1`, 원내망 공유 시 `0.0.0.0`) — 로컬 실행 시에만 적용
+- `FLASK_PORT` : 포트 (기본 `5000`) — 로컬 실행 시에만 적용
 - `FLASK_DEBUG` : `1`로 설정하면 디버그 모드 활성화 (운영 환경에서는 절대 사용 금지)
+
+---
+
+## ☁️ Vercel 배포 (Deployment)
+
+이 저장소는 Vercel 서버리스(`@vercel/python`)로 배포할 수 있도록 `vercel.json`과 `api/index.py`가 포함되어 있습니다.
+
+1. **[vercel.com](https://vercel.com)** 에서 이 GitHub 저장소를 Import 합니다 (New Project → Import Git Repository).
+2. 프로젝트 생성 후 **Storage** 탭에서 Postgres 데이터베이스를 생성하고 프로젝트에 연결합니다.
+   - Vercel이 자동으로 `DATABASE_URL`(또는 `POSTGRES_URL`) 환경변수를 프로젝트에 주입합니다.
+3. **Deploy**를 실행합니다. 첫 요청 시 `app.py`의 `init_db()`가 실행되어 테이블 생성과 시드 데이터 삽입이 자동으로 이루어집니다.
+4. 배포 완료 후 발급된 `https://*.vercel.app` 주소로 접속하면 됩니다.
+
+> ⚠️ **주의**: Vercel 서버리스 함수는 파일시스템이 읽기전용이라 SQLite 파일 기반 저장은 동작하지 않습니다. 이 때문에 DB를 PostgreSQL로 전환했습니다 — 로컬 개발 시에도 반드시 `DATABASE_URL`을 PostgreSQL 연결 문자열로 지정해야 합니다.
+
+> ℹ️ 동시에 여러 서버리스 인스턴스가 최초 콜드 스타트를 겪을 경우 시드 데이터가 중복 삽입될 가능성이 이론적으로 존재합니다 (부서/직원 테이블은 `ON CONFLICT DO NOTHING`으로 보호되어 있으나 KPI 테이블은 그렇지 않음). 트래픽이 매우 적은 내부 도구 특성상 실제 발생 가능성은 낮지만, 만약 중복이 발견되면 DB에서 수동으로 정리해주세요.
 
 ---
 
@@ -76,8 +102,10 @@ python app.py
 
 ```
 직원관리용KPI대시보드/
-├── app.py                     # Flask 백엔드 메인 서버 (REST API & SQLite DB 초기화)
-├── kpi_database.db            # SQLite 데이터베이스 (앱 실행 시 자동 생성 및 데이터 시딩)
+├── app.py                     # Flask 백엔드 메인 서버 (REST API & PostgreSQL DB 초기화)
+├── api/
+│   └── index.py                # Vercel 서버리스 함수 진입점 (app.py의 Flask 앱을 그대로 사용)
+├── vercel.json                 # Vercel 빌드/라우팅 설정
 ├── requirements.txt           # Python 패키지 의존성 파일
 ├── run.bat                    # 윈도우 원클릭 서버 실행 배치 파일
 ├── .gitignore                 # Git 버전 관리 제외 설정 파일

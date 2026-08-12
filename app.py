@@ -1,12 +1,18 @@
 import os
-import sqlite3
 import csv
 import io
 from datetime import date
+import psycopg2
+import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, Response
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
-DB_PATH = os.path.join(os.path.dirname(__file__), 'kpi_database.db')
 
 # Per-employee KPI achievement, weighted by each KPI's weight (consistent
 # across the summary, table and detail views instead of a plain average).
@@ -14,7 +20,7 @@ EMP_SCORE_CTE = '''
 WITH emp_scores AS (
     SELECT e.id AS emp_id,
            CASE WHEN SUM(k.weight) > 0
-                THEN SUM(k.progress_pct * k.weight) * 1.0 / SUM(k.weight)
+                THEN SUM(k.progress_pct * k.weight)::float / SUM(k.weight)
                 ELSE 0 END AS weighted_pct,
            COUNT(k.id) AS kpi_count,
            SUM(CASE WHEN k.status = '지연' THEN 1 ELSE 0 END) AS delayed_kpi_cnt
@@ -24,9 +30,18 @@ WITH emp_scores AS (
 )
 '''
 
+def get_database_url():
+    for key in ('DATABASE_URL', 'POSTGRES_URL', 'POSTGRES_PRISMA_URL'):
+        value = os.environ.get(key)
+        if value:
+            return value
+    raise RuntimeError(
+        'DATABASE_URL (또는 POSTGRES_URL) 환경변수가 설정되어 있지 않습니다. '
+        'PostgreSQL 연결 문자열을 환경변수로 설정한 뒤 다시 실행해주세요.'
+    )
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(get_database_url(), cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
 
 def parse_float(value, default=None):
@@ -42,7 +57,7 @@ def parse_int(value, default=None):
         return default
 
 def employee_exists(cursor, emp_id):
-    cursor.execute('SELECT 1 FROM employees WHERE id = ?', (emp_id,))
+    cursor.execute('SELECT 1 FROM employees WHERE id = %s', (emp_id,))
     return cursor.fetchone() is not None
 
 def init_db():
@@ -52,15 +67,15 @@ def init_db():
     # Create tables
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS departments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
-        code TEXT NOT NULL
+        code TEXT NOT NULL UNIQUE
     )
     ''')
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS employees (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         emp_no TEXT UNIQUE NOT NULL,
         name TEXT NOT NULL,
         dept_id INTEGER NOT NULL,
@@ -78,7 +93,7 @@ def init_db():
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS kpis (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         emp_id INTEGER NOT NULL,
         title TEXT NOT NULL,
         category TEXT NOT NULL,
@@ -95,11 +110,12 @@ def init_db():
     ''')
 
     # Check if seed data exists
-    cursor.execute('SELECT COUNT(*) FROM departments')
-    if cursor.fetchone()[0] == 0:
+    cursor.execute('SELECT COUNT(*) AS cnt FROM departments')
+    if cursor.fetchone()['cnt'] == 0:
         seed_data(cursor)
 
     conn.commit()
+    cursor.close()
     conn.close()
 
 def seed_data(cursor):
@@ -110,7 +126,7 @@ def seed_data(cursor):
         ("철도구조·해상교량연구실", "SMB"),
         ("철도안전·환경연구실", "RSE")
     ]
-    cursor.executemany('INSERT INTO departments (name, code) VALUES (?, ?)', departments)
+    cursor.executemany('INSERT INTO departments (name, code) VALUES (%s, %s) ON CONFLICT (code) DO NOTHING', departments)
 
     employees = [
         # 미래교통물류연구소
@@ -145,7 +161,8 @@ def seed_data(cursor):
     ]
     cursor.executemany('''
     INSERT INTO employees (emp_no, name, dept_id, position, email, research_area, project_participation_pct, eval_grade, eval_score, eval_feedback, eval_date)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (emp_no) DO NOTHING
     ''', employees)
 
     # Specific KPIs
@@ -191,7 +208,7 @@ def seed_data(cursor):
 
     cursor.executemany('''
     INSERT INTO kpis (emp_id, title, category, weight, target_val, current_val, unit, status, target_date, progress_pct, description)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ''', kpis)
 
 @app.route('/')
@@ -213,7 +230,7 @@ def dashboard_summary():
     '''
     params = []
     if dept_id:
-        query += ' WHERE e.dept_id = ?'
+        query += ' WHERE e.dept_id = %s'
         params.append(dept_id)
 
     cursor.execute(query, params)
@@ -221,6 +238,7 @@ def dashboard_summary():
 
     total_employees = len(rows)
     if total_employees == 0:
+        conn.close()
         return jsonify({
             'total_employees': 0, 'avg_achievement': 0,
             'top_performers': 0, 'risk_employees': 0,
@@ -247,12 +265,12 @@ def dashboard_summary():
 
     # Category Breakdown
     cat_query = '''
-    SELECT k.category, AVG(k.progress_pct) as avg_pct, COUNT(k.id) as count
+    SELECT k.category, AVG(k.progress_pct)::float as avg_pct, COUNT(k.id) as count
     FROM kpis k
     JOIN employees e ON k.emp_id = e.id
     '''
     if dept_id:
-        cat_query += ' WHERE e.dept_id = ?'
+        cat_query += ' WHERE e.dept_id = %s'
         cursor.execute(cat_query + ' GROUP BY k.category', [dept_id])
     else:
         cursor.execute(cat_query + ' GROUP BY k.category')
@@ -310,20 +328,20 @@ def get_employees():
     params = []
 
     if dept_id:
-        query += ' AND e.dept_id = ?'
+        query += ' AND e.dept_id = %s'
         params.append(dept_id)
 
     if search:
-        query += ' AND (e.name LIKE ? OR e.emp_no LIKE ? OR e.research_area LIKE ? OR e.position LIKE ?)'
+        query += ' AND (e.name LIKE %s OR e.emp_no LIKE %s OR e.research_area LIKE %s OR e.position LIKE %s)'
         pattern = f'%{search}%'
         params.extend([pattern, pattern, pattern, pattern])
 
     if grade_filter:
         if grade_filter == 'CD':
-            query += ' AND e.eval_grade IN (?, ?)'
+            query += ' AND e.eval_grade IN (%s, %s)'
             params.extend(['C', 'D'])
         else:
-            query += ' AND e.eval_grade = ?'
+            query += ' AND e.eval_grade = %s'
             params.append(grade_filter)
 
     query += ' ORDER BY e.eval_score DESC'
@@ -377,7 +395,7 @@ def get_employee_detail(emp_id):
     SELECT e.*, d.name as dept_name
     FROM employees e
     JOIN departments d ON e.dept_id = d.id
-    WHERE e.id = ?
+    WHERE e.id = %s
     ''', (emp_id,))
     emp_row = cursor.fetchone()
 
@@ -386,7 +404,7 @@ def get_employee_detail(emp_id):
         return jsonify({'error': 'Employee not found'}), 404
 
     cursor.execute('''
-    SELECT * FROM kpis WHERE emp_id = ? ORDER BY id ASC
+    SELECT * FROM kpis WHERE emp_id = %s ORDER BY id ASC
     ''', (emp_id,))
     kpi_rows = cursor.fetchall()
 
@@ -433,7 +451,8 @@ def add_kpi(emp_id):
 
     cursor.execute('''
     INSERT INTO kpis (emp_id, title, category, weight, target_val, current_val, unit, status, target_date, progress_pct, description)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id
     ''', (
         emp_id,
         title,
@@ -448,8 +467,8 @@ def add_kpi(emp_id):
         data.get('description', '')
     ))
 
+    new_id = cursor.fetchone()['id']
     conn.commit()
-    new_id = cursor.lastrowid
     conn.close()
     return jsonify({'success': True, 'id': new_id})
 
@@ -459,7 +478,7 @@ def update_kpi(kpi_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute('SELECT * FROM kpis WHERE id = ?', (kpi_id,))
+    cursor.execute('SELECT * FROM kpis WHERE id = %s', (kpi_id,))
     existing = cursor.fetchone()
     if not existing:
         conn.close()
@@ -483,8 +502,8 @@ def update_kpi(kpi_id):
 
     cursor.execute('''
     UPDATE kpis
-    SET title = ?, category = ?, weight = ?, target_val = ?, current_val = ?, unit = ?, status = ?, target_date = ?, progress_pct = ?, description = ?
-    WHERE id = ?
+    SET title = %s, category = %s, weight = %s, target_val = %s, current_val = %s, unit = %s, status = %s, target_date = %s, progress_pct = %s, description = %s
+    WHERE id = %s
     ''', (
         data.get('title', existing['title']),
         data.get('category', existing['category']),
@@ -508,7 +527,7 @@ def delete_kpi(kpi_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute('DELETE FROM kpis WHERE id = ?', (kpi_id,))
+    cursor.execute('DELETE FROM kpis WHERE id = %s', (kpi_id,))
     conn.commit()
     conn.close()
     return jsonify({'success': True})
@@ -538,8 +557,8 @@ def save_evaluation(emp_id):
 
     cursor.execute('''
     UPDATE employees
-    SET eval_score = ?, eval_grade = ?, eval_feedback = ?, eval_date = ?
-    WHERE id = ?
+    SET eval_score = %s, eval_grade = %s, eval_feedback = %s, eval_date = %s
+    WHERE id = %s
     ''', (eval_score, eval_grade, eval_feedback, eval_date, emp_id))
 
     conn.commit()
@@ -556,17 +575,18 @@ def ai_analyze():
 
     query = '''
     SELECT e.name, e.position, d.name as dept_name, e.eval_grade, e.eval_score, e.research_area,
-           AVG(k.progress_pct) as avg_pct,
+           AVG(k.progress_pct)::float as avg_pct,
            SUM(CASE WHEN k.status = '지연' THEN 1 ELSE 0 END) as delayed_cnt
     FROM employees e
     JOIN departments d ON e.dept_id = d.id
     LEFT JOIN kpis k ON e.id = k.emp_id
     '''
+    group_by = ' GROUP BY e.id, e.name, e.position, d.name, e.eval_grade, e.eval_score, e.research_area'
     if dept_id:
-        query += ' WHERE e.dept_id = ?'
-        cursor.execute(query + ' GROUP BY e.id', [dept_id])
+        query += ' WHERE e.dept_id = %s'
+        cursor.execute(query + group_by, [dept_id])
     else:
-        cursor.execute(query + ' GROUP BY e.id')
+        cursor.execute(query + group_by)
 
     rows = cursor.fetchall()
     conn.close()
@@ -624,7 +644,7 @@ def export_csv():
     conn.close()
 
     output = io.StringIO()
-    output.write('\ufeff') # UTF-8 BOM for Excel
+    output.write('﻿') # UTF-8 BOM for Excel
     writer = csv.writer(output)
     writer.writerow(['사번', '성명', '소속부서', '직급', '평가등급', '평가점수', 'KPI평균달성률(%)', '주요연구분야'])
 
@@ -644,8 +664,12 @@ def export_csv():
     response.headers['Content-Disposition'] = 'attachment; filename=KRRI_KPI_Employee_Report.csv'
     return response
 
+# Runs on every cold start (both local `python app.py` and Vercel's serverless
+# import of this module), not just under __main__, since Vercel never executes
+# the __main__ block below.
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     host = os.environ.get('FLASK_HOST', '127.0.0.1')
     port = int(os.environ.get('FLASK_PORT', 5000))
     debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
