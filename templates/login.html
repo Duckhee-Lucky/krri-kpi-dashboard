@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>로그인 | KRRI KPI 성과관리 시스템</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="login-page">
+    <script>try { if (localStorage.getItem('krri_theme') === 'dark') document.body.classList.add('dark-mode'); } catch (e) {}</script>
+    <main class="login-card">
+        <div class="login-brand">
+            <span class="krri-badge">KRRI</span>
+            <div>
+                <h1>보직자 전용 KPI 성과관리 시스템</h1>
+                <p>한국철도기술연구원 내부 시스템입니다. 발급받은 계정으로 로그인하세요.</p>
+            </div>
+        </div>
+
+        {% if error %}
+        <div class="login-error" role="alert">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('login') }}" class="login-form">
+            <input type="hidden" name="next" value="{{ next }}">
+            <label class="form-label" for="username">아이디</label>
+            <input class="text-input" id="username" name="username" autocomplete="username"
+                   value="{{ username or '' }}" required autofocus>
+            <label class="form-label" for="password">비밀번호</label>
+            <input class="text-input" id="password" name="password" type="password"
+                   autocomplete="current-password" required>
+            <button type="submit" class="btn btn-primary login-submit">로그인</button>
+        </form>
+        <p class="login-help">계정 발급과 비밀번호 초기화는 시스템 관리자에게 요청하세요.</p>
+    </main>
+</body>
+</html>
