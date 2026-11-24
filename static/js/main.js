@@ -54,6 +54,19 @@ function showToast(message, type = 'info') {
     }, 3000);
 }
 
+// All API calls go through here: adds the CSRF header the server requires on
+// state-changing requests and sends the user back to the login page when the
+// session has expired.
+async function apiFetch(url, options = {}) {
+    const headers = Object.assign({ 'X-Requested-With': 'fetch' }, options.headers || {});
+    const res = await fetch(url, Object.assign({}, options, { headers, credentials: 'same-origin' }));
+    if (res.status === 401) {
+        window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
+        throw new Error('로그인이 필요합니다.');
+    }
+    return res;
+}
+
 // Escape user-supplied text before inserting via innerHTML
 function escapeHtml(value) {
     if (value === null || value === undefined) return '';
@@ -74,7 +87,8 @@ function debounceSearch() {
 }
 
 function resetFilters() {
-    document.getElementById('deptSelect').value = '';
+    const deptSelect = document.getElementById('deptSelect');
+    deptSelect.value = deptSelect.options.length ? deptSelect.options[0].value : '';
     document.getElementById('searchInput').value = '';
     currentFilterStatus = '';
     currentFilterGrade = '';
@@ -91,7 +105,7 @@ function resetFilters() {
 async function loadDashboardData() {
     const deptId = document.getElementById('deptSelect').value;
     try {
-        const res = await fetch(`/api/dashboard/summary?dept_id=${deptId}`);
+        const res = await apiFetch(`/api/dashboard/summary?dept_id=${deptId}`);
         const data = await res.json();
 
         // Update Cards
@@ -279,7 +293,7 @@ async function loadEmployeeTable() {
     if (currentFilterGrade) url += `&grade=${encodeURIComponent(currentFilterGrade)}`;
 
     try {
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         const employees = await res.json();
 
         const tbody = document.getElementById('employeeTableBody');
@@ -373,7 +387,7 @@ function updatePillButtons(clickedBtn) {
 async function openEmployeeModal(empId) {
     currentEmpId = empId;
     try {
-        const res = await fetch(`/api/employees/${empId}`);
+        const res = await apiFetch(`/api/employees/${empId}`);
         const data = await res.json();
         const emp = data.employee;
         const kpis = data.kpis;
@@ -449,7 +463,7 @@ async function saveEvaluation(event) {
     const feedback = document.getElementById('evalFeedbackText').value;
 
     try {
-        const res = await fetch(`/api/employees/${empId}/eval`, {
+        const res = await apiFetch(`/api/employees/${empId}/eval`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -495,7 +509,7 @@ async function saveNewKpi(event) {
     };
 
     try {
-        const res = await fetch(`/api/employees/${currentEmpId}/kpis`, {
+        const res = await apiFetch(`/api/employees/${currentEmpId}/kpis`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -518,7 +532,7 @@ async function saveNewKpi(event) {
 // Update KPI current value inline
 async function updateKpiCurrent(kpiId, newVal, targetVal) {
     try {
-        await fetch(`/api/kpis/${kpiId}`, {
+        await apiFetch(`/api/kpis/${kpiId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -538,7 +552,7 @@ async function updateKpiCurrent(kpiId, newVal, targetVal) {
 async function deleteKpiItem(kpiId) {
     if (!confirm('이 KPI 항목을 삭제하시겠습니까?')) return;
     try {
-        await fetch(`/api/kpis/${kpiId}`, { method: 'DELETE' });
+        await apiFetch(`/api/kpis/${kpiId}`, { method: 'DELETE' });
         showToast('KPI 항목이 삭제되었습니다.');
         if (currentEmpId) openEmployeeModal(currentEmpId);
         loadDashboardData();
@@ -556,7 +570,7 @@ async function openAIReportModal() {
     const deptId = document.getElementById('deptSelect').value;
 
     try {
-        const res = await fetch('/api/ai/analyze', {
+        const res = await apiFetch('/api/ai/analyze', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ dept_id: deptId })
@@ -576,5 +590,6 @@ function formatMarkdownText(text) {
 
 // Export CSV
 function exportCSV() {
-    window.location.href = '/api/export/csv';
+    const deptId = document.getElementById('deptSelect').value;
+    window.location.href = '/api/export/csv' + (deptId ? `?dept_id=${encodeURIComponent(deptId)}` : '');
 }

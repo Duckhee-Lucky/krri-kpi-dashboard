@@ -55,7 +55,26 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname?sslmode=require
 ```
 (Vercel Postgres/Neon을 쓴다면 해당 대시보드에서 발급된 connection string을 그대로 붙여넣으면 됩니다.)
 
-### 3. 프로젝트 설치 및 실행
+### 3. 로그인 계정 준비 (필수)
+모든 화면과 API는 로그인한 사용자만 쓸 수 있습니다. 역할은 두 가지입니다.
+- **admin (관리자)**: 전체 부서 열람·관리
+- **manager (보직자)**: 자기 소속 부서 직원만 열람·평가·KPI 수정 (다른 부서를 요청해도 서버가 자기 부서로 고정)
+
+`.env`에 세션 서명 키와 최초 관리자 계정을 지정합니다. 사용자가 한 명도 없을 때 첫 실행에서 관리자 계정이 자동 생성됩니다.
+```
+SECRET_KEY=임의의-긴-문자열   # python -c "import secrets; print(secrets.token_hex(32))"
+INITIAL_ADMIN_USERNAME=admin
+INITIAL_ADMIN_PASSWORD=충분히-긴-비밀번호
+```
+보직자 계정은 명령어로 만듭니다 (같은 아이디로 다시 실행하면 비밀번호 재설정):
+```bash
+flask --app app create-user --username ftl_head --name "홍길동 연구소장" --role manager --dept-code FTL
+flask --app app deactivate-user ftl_head   # 계정 비활성화 (즉시 로그아웃)
+```
+부서 코드: `FTL` 미래교통물류연구소, `NRV` 차세대철도차량연구센터, `SPS` 스마트전력·신호연구실, `SMB` 철도구조·해상교량연구실, `RSE` 철도안전·환경연구실.
+Vercel에 배포한 경우에도 로컬에서 같은 `DATABASE_URL`을 지정하고 위 명령을 실행하면 됩니다.
+
+### 4. 프로젝트 설치 및 실행
 
 #### Windows (원클릭 실행)
 `run.bat` 파일을 더블 클릭하여 실행합니다. (`.env`에 `DATABASE_URL`이 없으면 안내 메시지를 띄우고 종료합니다.)
@@ -70,12 +89,15 @@ python app.py
 ```
 최초 실행 시 테이블 생성 및 더미 시드 데이터 삽입이 자동으로 수행됩니다.
 
-### 4. 브라우저 접속
+### 5. 브라우저 접속
 서버 구동 후 웹 브라우저에서 다음 주소로 접속합니다.
 - **[http://127.0.0.1:5000](http://127.0.0.1:5000)**
 
-### 5. 환경변수 목록
+### 6. 환경변수 목록
 - `DATABASE_URL` (또는 `POSTGRES_URL`) : PostgreSQL 연결 문자열 (**필수**)
+- `SECRET_KEY` : 로그인 세션 서명 키 (**필수**, `FLASK_DEBUG=1`일 때만 생략 가능하며 재시작마다 로그아웃됨)
+- `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD` : 사용자가 없을 때 만들 최초 관리자 계정
+- `SESSION_COOKIE_SECURE` : `1`이면 HTTPS에서만 세션 쿠키 전송 (Vercel에서는 자동으로 `1`)
 - `FLASK_HOST` : 바인딩 주소 (기본 `127.0.0.1`, 원내망 공유 시 `0.0.0.0`) — 로컬 실행 시에만 적용
 - `FLASK_PORT` : 포트 (기본 `5000`) — 로컬 실행 시에만 적용
 - `FLASK_DEBUG` : `1`로 설정하면 디버그 모드 활성화 (운영 환경에서는 절대 사용 금지)
@@ -89,6 +111,7 @@ python app.py
 1. **[vercel.com](https://vercel.com)** 에서 이 GitHub 저장소를 Import 합니다 (New Project → Import Git Repository).
 2. 프로젝트 생성 후 **Storage** 탭에서 Postgres 데이터베이스를 생성하고 프로젝트에 연결합니다.
    - Vercel이 자동으로 `DATABASE_URL`(또는 `POSTGRES_URL`) 환경변수를 프로젝트에 주입합니다.
+   - **Settings → Environment Variables**에 `SECRET_KEY`, `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_PASSWORD`를 추가합니다.
 3. **Deploy**를 실행합니다. 첫 요청 시 `app.py`의 `init_db()`가 실행되어 테이블 생성과 시드 데이터 삽입이 자동으로 이루어집니다.
 4. 배포 완료 후 발급된 `https://*.vercel.app` 주소로 접속하면 됩니다.
 
@@ -116,7 +139,8 @@ python app.py
 │   └── js/
 │       └── main.js            # Chart.js 시각화 및 대시보드 인터랙션 로직
 └── templates/
-    └── index.html             # 메인 대시보드 및 모달 HTML 레이아웃
+    ├── index.html             # 메인 대시보드 및 모달 HTML 레이아웃
+    └── login.html             # 로그인 화면
 ```
 
 ---

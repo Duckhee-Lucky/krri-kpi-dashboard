@@ -1,10 +1,15 @@
 import os
 import csv
 import io
-from datetime import date
+import secrets
+from datetime import date, timedelta
+from functools import wraps
+import click
 import psycopg2
 import psycopg2.extras
-from flask import Flask, render_template, request, jsonify, Response
+from flask import (Flask, render_template, request, jsonify, Response,
+                   session, redirect, url_for, g)
+from werkzeug.security import generate_password_hash, check_password_hash
 
 try:
     from dotenv import load_dotenv
@@ -13,6 +18,32 @@ except ImportError:
     pass
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
+
+
+def _load_secret_key():
+    key = os.environ.get('SECRET_KEY')
+    if key:
+        return key
+    if os.environ.get('FLASK_DEBUG', '0') == '1':
+        # Local debugging only: sessions reset on every restart.
+        return secrets.token_hex(32)
+    raise RuntimeError(
+        'SECRET_KEY 환경변수가 설정되어 있지 않습니다. 로그인 세션 서명에 필요하므로 '
+        '임의의 긴 문자열(예: python -c "import secrets; print(secrets.token_hex(32))")을 설정해주세요.'
+    )
+
+
+app.config.update(
+    SECRET_KEY=_load_secret_key(),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    # Vercel sets VERCEL=1; there the site is always served over HTTPS.
+    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', '1' if os.environ.get('VERCEL') else '0') == '1',
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+)
+
+ROLE_ADMIN = 'admin'      # 전체 부서 열람/관리 (예: 원장, 기획부서)
+ROLE_MANAGER = 'manager'  # 자기 부서 소속 직원만 열람/관리 (본부장/센터장/실장)
 
 # Per-employee KPI achievement, weighted by each KPI's weight (consistent
 # across the summary, table and detail views instead of a plain average).
@@ -55,10 +86,6 @@ def parse_int(value, default=None):
         return int(value)
     except (TypeError, ValueError):
         return default
-
-def employee_exists(cursor, emp_id):
-    cursor.execute('SELECT 1 FROM employees WHERE id = %s', (emp_id,))
-    return cursor.fetchone() is not None
 
 def init_db():
     conn = get_db()
@@ -109,10 +136,26 @@ def init_db():
     )
     ''')
 
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('admin', 'manager')),
+        dept_id INTEGER REFERENCES departments(id),
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (role = 'admin' OR dept_id IS NOT NULL)
+    )
+    ''')
+
     # Check if seed data exists
     cursor.execute('SELECT COUNT(*) AS cnt FROM departments')
     if cursor.fetchone()['cnt'] == 0:
         seed_data(cursor)
+
+    bootstrap_admin(cursor)
 
     conn.commit()
     cursor.close()
@@ -211,13 +254,216 @@ def seed_data(cursor):
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ''', kpis)
 
+# ---------------------------------------------------------------------------
+# Authentication & department-scoped authorization
+# ---------------------------------------------------------------------------
+
+def bootstrap_admin(cursor):
+    """Create the first admin from env vars when no user exists yet."""
+    cursor.execute('SELECT COUNT(*) AS cnt FROM users')
+    if cursor.fetchone()['cnt'] > 0:
+        return
+    username = (os.environ.get('INITIAL_ADMIN_USERNAME') or '').strip()
+    password = os.environ.get('INITIAL_ADMIN_PASSWORD') or ''
+    if not username or not password:
+        print('[auth] 등록된 사용자가 없습니다. INITIAL_ADMIN_USERNAME / INITIAL_ADMIN_PASSWORD 환경변수를 '
+              '설정하거나 `flask --app app create-user` 명령으로 계정을 만들어주세요.')
+        return
+    cursor.execute('''
+    INSERT INTO users (username, password_hash, display_name, role)
+    VALUES (%s, %s, %s, 'admin')
+    ON CONFLICT (username) DO NOTHING
+    ''', (username, generate_password_hash(password), '시스템 관리자'))
+
+
+PUBLIC_ENDPOINTS = {'login', 'static'}
+
+
+@app.before_request
+def load_current_user():
+    g.user = None
+    user_id = session.get('user_id')
+    if user_id:
+        conn = get_db()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT u.id, u.username, u.display_name, u.role, u.dept_id, d.name AS dept_name
+            FROM users u
+            LEFT JOIN departments d ON d.id = u.dept_id
+            WHERE u.id = %s AND u.is_active
+            ''', (user_id,))
+            g.user = cursor.fetchone()
+        finally:
+            conn.close()
+        if g.user is None:
+            session.clear()
+
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+
+    is_api = request.path.startswith('/api/')
+    if g.user is None:
+        if is_api:
+            return jsonify({'error': '로그인이 필요합니다.'}), 401
+        return redirect(url_for('login', next=request.path))
+
+    # CSRF defence for state-changing API calls: browsers will not attach this
+    # custom header on a cross-site request without a CORS preflight, which
+    # this app never grants.
+    if is_api and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        if request.headers.get('X-Requested-With') != 'fetch':
+            return jsonify({'error': '잘못된 요청입니다.'}), 403
+    return None
+
+
+def is_admin():
+    return g.user is not None and g.user['role'] == ROLE_ADMIN
+
+
+def scoped_dept_id(requested):
+    """Department filter the current user may apply.
+
+    Admins get whatever they asked for (None = all departments). Managers are
+    always pinned to their own department, whatever they requested.
+    """
+    if is_admin():
+        return requested or None
+    return g.user['dept_id']
+
+
+def can_access_employee(cursor, emp_id):
+    """Returns True/False for an existing employee, None if it does not exist."""
+    cursor.execute('SELECT dept_id FROM employees WHERE id = %s', (emp_id,))
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return is_admin() or row['dept_id'] == g.user['dept_id']
+
+
+def _safe_next(target):
+    # Only allow same-site relative paths to avoid open redirects.
+    if target and target.startswith('/') and not target.startswith('//'):
+        return target
+    return url_for('index')
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'GET':
+        if g.user is not None:
+            return redirect(url_for('index'))
+        return render_template('login.html', error=None, next=request.args.get('next', ''))
+
+    username = (request.form.get('username') or '').strip()
+    password = request.form.get('password') or ''
+    next_url = request.form.get('next', '')
+
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, password_hash, is_active FROM users WHERE username = %s', (username,))
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+
+    if row is None or not row['is_active'] or not check_password_hash(row['password_hash'], password):
+        return render_template('login.html', error='아이디 또는 비밀번호가 올바르지 않습니다.',
+                               next=next_url, username=username), 401
+
+    session.clear()
+    session.permanent = True
+    session['user_id'] = row['id']
+    return redirect(_safe_next(next_url))
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
+@app.route('/api/me')
+def api_me():
+    return jsonify({
+        'username': g.user['username'],
+        'display_name': g.user['display_name'],
+        'role': g.user['role'],
+        'dept_id': g.user['dept_id'],
+        'dept_name': g.user['dept_name'],
+    })
+
+
+@app.cli.command('create-user')
+@click.option('--username', prompt='아이디')
+@click.option('--name', 'display_name', prompt='표시 이름 (예: 홍길동 센터장)')
+@click.option('--role', type=click.Choice([ROLE_ADMIN, ROLE_MANAGER]), prompt='역할', default=ROLE_MANAGER)
+@click.option('--dept-code', default='', help='manager 역할일 때 소속 부서 코드 (예: FTL)')
+@click.password_option('--password', prompt='비밀번호')
+def create_user_command(username, display_name, role, dept_code, password):
+    """보직자/관리자 계정을 생성하거나 비밀번호를 재설정합니다."""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        dept_id = None
+        if role == ROLE_MANAGER:
+            if not dept_code:
+                cursor.execute('SELECT code, name FROM departments ORDER BY id')
+                for d in cursor.fetchall():
+                    click.echo(f"  {d['code']}: {d['name']}")
+                dept_code = click.prompt('소속 부서 코드')
+            cursor.execute('SELECT id FROM departments WHERE code = %s', (dept_code.strip().upper(),))
+            dept = cursor.fetchone()
+            if dept is None:
+                raise click.ClickException(f'부서 코드 {dept_code} 를 찾을 수 없습니다.')
+            dept_id = dept['id']
+        if len(password) < 8:
+            raise click.ClickException('비밀번호는 8자 이상이어야 합니다.')
+        cursor.execute('''
+        INSERT INTO users (username, password_hash, display_name, role, dept_id)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (username) DO UPDATE
+        SET password_hash = EXCLUDED.password_hash, display_name = EXCLUDED.display_name,
+            role = EXCLUDED.role, dept_id = EXCLUDED.dept_id, is_active = TRUE
+        ''', (username.strip(), generate_password_hash(password), display_name.strip(), role, dept_id))
+        conn.commit()
+    finally:
+        conn.close()
+    click.echo(f'계정 {username} 저장 완료 ({role}).')
+
+
+@app.cli.command('deactivate-user')
+@click.argument('username')
+def deactivate_user_command(username):
+    """계정을 비활성화합니다 (즉시 로그아웃 처리)."""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_active = FALSE WHERE username = %s', (username,))
+        changed = cursor.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    click.echo(f'{username} 비활성화 완료.' if changed else f'{username} 계정을 찾을 수 없습니다.')
+
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        if is_admin():
+            cursor.execute('SELECT id, name FROM departments ORDER BY id')
+        else:
+            cursor.execute('SELECT id, name FROM departments WHERE id = %s', (g.user['dept_id'],))
+        departments = cursor.fetchall()
+    finally:
+        conn.close()
+    return render_template('index.html', user=g.user, departments=departments, is_admin=is_admin())
 
 @app.route('/api/dashboard/summary')
 def dashboard_summary():
-    dept_id = request.args.get('dept_id', type=int)
+    dept_id = scoped_dept_id(request.args.get('dept_id', type=int))
     conn = get_db()
     cursor = conn.cursor()
 
@@ -258,8 +504,10 @@ def dashboard_summary():
     FROM departments d
     JOIN employees e ON d.id = e.dept_id
     JOIN emp_scores es ON es.emp_id = e.id
+    ''' + ('' if is_admin() else ' WHERE d.id = %s') + '''
     GROUP BY d.id
-    ''')
+    ORDER BY d.id
+    ''', [] if is_admin() else [g.user['dept_id']])
     dept_rows = cursor.fetchall()
     dept_stats = [{'id': r['id'], 'name': r['name'], 'avg_pct': round(r['avg_pct'] or 0, 1), 'emp_cnt': r['emp_cnt']} for r in dept_rows]
 
@@ -280,10 +528,10 @@ def dashboard_summary():
     # Grade Distribution
     grade_counts = {'S': 0, 'A': 0, 'B': 0, 'C': 0, 'D': 0}
     for r in rows:
-        g = r['eval_grade']
-        if g in grade_counts:
-            grade_counts[g] += 1
-    grade_dist = [{'grade': g, 'count': cnt} for g, cnt in grade_counts.items()]
+        grade = r['eval_grade']
+        if grade in grade_counts:
+            grade_counts[grade] += 1
+    grade_dist = [{'grade': gr, 'count': cnt} for gr, cnt in grade_counts.items()]
 
     # Quarterly Trend (Mock baseline with actual current avg for Q2/Q3)
     quarterly_trend = [
@@ -307,7 +555,7 @@ def dashboard_summary():
 
 @app.route('/api/employees')
 def get_employees():
-    dept_id = request.args.get('dept_id', type=int)
+    dept_id = scoped_dept_id(request.args.get('dept_id', type=int))
     search = request.args.get('search', '', type=str).strip()
     status_filter = request.args.get('status', '', type=str)
     grade_filter = request.args.get('grade', '', type=str)
@@ -391,6 +639,10 @@ def get_employee_detail(emp_id):
     conn = get_db()
     cursor = conn.cursor()
 
+    if not can_access_employee(cursor, emp_id):
+        conn.close()
+        return jsonify({'error': 'Employee not found'}), 404
+
     cursor.execute('''
     SELECT e.*, d.name as dept_name
     FROM employees e
@@ -436,7 +688,7 @@ def add_kpi(emp_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    if not employee_exists(cursor, emp_id):
+    if not can_access_employee(cursor, emp_id):
         conn.close()
         return jsonify({'error': 'Employee not found'}), 404
 
@@ -480,7 +732,7 @@ def update_kpi(kpi_id):
 
     cursor.execute('SELECT * FROM kpis WHERE id = %s', (kpi_id,))
     existing = cursor.fetchone()
-    if not existing:
+    if not existing or not can_access_employee(cursor, existing['emp_id']):
         conn.close()
         return jsonify({'error': 'KPI not found'}), 404
 
@@ -527,6 +779,12 @@ def delete_kpi(kpi_id):
     conn = get_db()
     cursor = conn.cursor()
 
+    cursor.execute('SELECT emp_id FROM kpis WHERE id = %s', (kpi_id,))
+    existing = cursor.fetchone()
+    if not existing or not can_access_employee(cursor, existing['emp_id']):
+        conn.close()
+        return jsonify({'error': 'KPI not found'}), 404
+
     cursor.execute('DELETE FROM kpis WHERE id = %s', (kpi_id,))
     conn.commit()
     conn.close()
@@ -538,7 +796,7 @@ def save_evaluation(emp_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    if not employee_exists(cursor, emp_id):
+    if not can_access_employee(cursor, emp_id):
         conn.close()
         return jsonify({'error': 'Employee not found'}), 404
 
@@ -568,7 +826,7 @@ def save_evaluation(emp_id):
 @app.route('/api/ai/analyze', methods=['POST'])
 def ai_analyze():
     data = request.json or {}
-    dept_id = data.get('dept_id')
+    dept_id = scoped_dept_id(parse_int(data.get('dept_id')))
 
     conn = get_db()
     cursor = conn.cursor()
@@ -629,6 +887,7 @@ def ai_analyze():
 
 @app.route('/api/export/csv')
 def export_csv():
+    dept_id = scoped_dept_id(request.args.get('dept_id', type=int))
     conn = get_db()
     cursor = conn.cursor()
 
@@ -638,8 +897,9 @@ def export_csv():
     FROM employees e
     JOIN departments d ON e.dept_id = d.id
     JOIN emp_scores es ON es.emp_id = e.id
+    WHERE (%s::int IS NULL OR e.dept_id = %s::int)
     ORDER BY e.eval_score DESC
-    ''')
+    ''', [dept_id, dept_id])
     rows = cursor.fetchall()
     conn.close()
 

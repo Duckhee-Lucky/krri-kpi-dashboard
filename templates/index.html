@@ -42,12 +42,15 @@
                 </button>
                 
                 <div class="exec-profile-chip">
-                    <div class="avatar">소장</div>
+                    <div class="avatar">{{ user.display_name[:1] }}</div>
                     <div class="exec-info">
-                        <div class="exec-name">김철수 연구소장</div>
-                        <div class="exec-role">미래교통물류연구소 / 보직자</div>
+                        <div class="exec-name">{{ user.display_name }}</div>
+                        <div class="exec-role">{% if is_admin %}전체 부서 / 관리자{% else %}{{ user.dept_name }} / 보직자{% endif %}</div>
                     </div>
                 </div>
+                <form method="post" action="{{ url_for('logout') }}" class="logout-form">
+                    <button type="submit" class="btn logout-btn">로그아웃</button>
+                </form>
             </div>
         </div>
     </header>
@@ -62,13 +65,13 @@
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
                     관할 조직:
                 </span>
-                <select id="deptSelect" class="select-input" onchange="loadDashboardData()">
+                <select id="deptSelect" class="select-input" onchange="loadDashboardData()" {% if not is_admin %}disabled{% endif %}>
+                    {% if is_admin %}
                     <option value="">전체 관할 부서 (통합)</option>
-                    <option value="1">미래교통물류연구소</option>
-                    <option value="2">차세대철도차량연구센터</option>
-                    <option value="3">스마트전력·신호연구실</option>
-                    <option value="4">철도구조·해상교량연구실</option>
-                    <option value="5">철도안전·환경연구실</option>
+                    {% endif %}
+                    {% for d in departments %}
+                    <option value="{{ d.id }}">{{ d.name }}</option>
+                    {% endfor %}
                 </select>
 
                 <span class="filter-label" style="margin-left: 1rem;">평가 연도:</span>
